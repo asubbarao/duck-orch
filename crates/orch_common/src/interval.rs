@@ -64,14 +64,14 @@ impl IntervalUnit {
                     Some(IntervalUnit::Daily)
                 } else {
                     // N-day windows: represent as Minutes(N * 1440).
-                    Some(IntervalUnit::Minutes(num * 1440))
+                    num.checked_mul(1440).map(IntervalUnit::Minutes)
                 }
             }
             "h" | "hour" | "hours" => {
                 if num == 1 {
                     Some(IntervalUnit::Hourly)
                 } else {
-                    Some(IntervalUnit::Minutes(num * 60))
+                    num.checked_mul(60).map(IntervalUnit::Minutes)
                 }
             }
             "m" | "min" | "mins" | "minute" | "minutes" => Some(IntervalUnit::Minutes(num)),
@@ -103,7 +103,11 @@ impl IntervalUnit {
     pub fn floor(self, ts: i64) -> i64 {
         let step = self.step_secs();
         // Integer floor division (handles negative timestamps correctly).
-        ts - ts.rem_euclid(step)
+        if step == 0 {
+            return ts;
+        }
+        // Clip the unrepresentable boundary below i64::MIN.
+        ts.saturating_sub(ts.rem_euclid(step))
     }
 }
 
@@ -149,12 +153,21 @@ pub fn expand_range(start_ts: i64, end_ts: i64, unit: IntervalUnit) -> Vec<i64> 
         return vec![];
     }
     let step = unit.step_secs();
+    if step == 0 {
+        return vec![];
+    }
     let t0 = unit.floor(start_ts);
     let mut timestamps = Vec::new();
     let mut t = t0;
     while t < end_ts {
         timestamps.push(t);
-        t += step;
+        match t.checked_add(step) {
+            Some(next) => t = next,
+            None => {
+                timestamps.push(end_ts);
+                return timestamps;
+            }
+        }
     }
     // Append exclusive end so callers can zip(ts, ts[1..]). Clip at end_ts
     // (mirrors SQLMesh): an unaligned end produces a *partial* final
@@ -175,6 +188,7 @@ pub fn merge_intervals(mut intervals: Vec<Interval>) -> Vec<Interval> {
     if intervals.is_empty() {
         return vec![];
     }
+    intervals.retain(|&(start, end)| start < end);
     intervals.sort_by_key(|&(s, _)| s);
     let mut merged: Vec<Interval> = Vec::with_capacity(intervals.len());
     for (s, e) in intervals {
@@ -263,6 +277,37 @@ mod tests {
     use super::*;
 
     // -------------------- IntervalUnit::from_str --------------------
+
+    #[test]
+    fn rejects_overflowing_units() {
+        assert_eq!(IntervalUnit::from_str("4294967295d"), None);
+        assert_eq!(IntervalUnit::from_str("4294967295h"), None);
+        assert_eq!(
+            IntervalUnit::from_str("2982616d"),
+            Some(IntervalUnit::Minutes(4294967040))
+        );
+    }
+
+    #[test]
+    fn range_near_epoch_limit_terminates() {
+        let end = i64::MAX;
+        let boundaries = expand_range(end - 100, end, IntervalUnit::Hourly);
+        assert_eq!(boundaries.last(), Some(&end));
+        assert!(boundaries.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn zero_width_ranges_are_empty() {
+        assert!(expand_range(0, 10, IntervalUnit::Minutes(0)).is_empty());
+    }
+
+    #[test]
+    fn invalid_stored_intervals_do_not_create_coverage() {
+        assert_eq!(
+            merge_intervals(vec![(3, 3), (20, 10), (1, 5)]),
+            vec![(1, 5)]
+        );
+    }
 
     #[test]
     fn parses_daily() {
@@ -480,5 +525,17 @@ mod tests {
             let unit2 = IntervalUnit::from_str(&unit.to_dsl_str()).unwrap();
             assert_eq!(unit, unit2);
         }
+    }
+}
+
+#[cfg(test)]
+mod floor_boundary_regressions {
+    use super::*;
+    #[test]
+    fn floor_at_minimum_epoch_does_not_overflow() {
+        assert_eq!(IntervalUnit::Hourly.floor(i64::MIN), i64::MIN);
+        assert_eq!(IntervalUnit::Minutes(0).floor(42), 42);
+        let ts = expand_range(i64::MIN, i64::MIN + 10, IntervalUnit::Hourly);
+        assert_eq!(ts, vec![i64::MIN, i64::MIN + 10]);
     }
 }

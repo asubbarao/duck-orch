@@ -18,7 +18,7 @@
 // project memory `feedback_no_jinja_duckorch`: DuckDB-native primitives +
 // simple substitution only.
 
-use chrono::{Duration, NaiveDate};
+use chrono::NaiveDate;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -53,7 +53,11 @@ impl std::fmt::Display for PartitionParseError {
         match self {
             PartitionParseError::Empty => write!(f, "@partitions_by: empty declaration"),
             PartitionParseError::UnknownKind(k) => {
-                write!(f, "@partitions_by: unknown kind `{}` (expected daily|static|multi)", k)
+                write!(
+                    f,
+                    "@partitions_by: unknown kind `{}` (expected daily|static|multi)",
+                    k
+                )
             }
             PartitionParseError::MissingParen(s) => {
                 write!(f, "@partitions_by: missing parentheses in `{}`", s)
@@ -65,7 +69,11 @@ impl std::fmt::Display for PartitionParseError {
                 write!(f, "@partitions_by {}: missing required `{}`", kind, field)
             }
             PartitionParseError::BadDate(s) => {
-                write!(f, "@partitions_by: invalid date `{}` (expected YYYY-MM-DD)", s)
+                write!(
+                    f,
+                    "@partitions_by: invalid date `{}` (expected YYYY-MM-DD)",
+                    s
+                )
             }
             PartitionParseError::EmptyList => write!(f, "@partitions_by: empty value list"),
         }
@@ -113,15 +121,17 @@ fn parse_daily_body(body: &str) -> Result<PartitionDef, PartitionParseError> {
         if kv.is_empty() {
             continue;
         }
-        let (k, v) = kv.split_once('=').ok_or_else(|| PartitionParseError::BadField {
-            key: kv.to_string(),
-            value: String::new(),
-        })?;
+        let (k, v) = kv
+            .split_once('=')
+            .ok_or_else(|| PartitionParseError::BadField {
+                key: kv.to_string(),
+                value: String::new(),
+            })?;
         let k = k.trim();
         let v = v.trim();
         match k {
-            "start" => start = Some(parse_iso_date(v)?),
-            "end" => end = Some(parse_iso_date(v)?),
+            "start" if start.is_none() => start = Some(parse_iso_date(v)?),
+            "end" if end.is_none() => end = Some(parse_iso_date(v)?),
             _ => {
                 return Err(PartitionParseError::BadField {
                     key: k.to_string(),
@@ -134,6 +144,12 @@ fn parse_daily_body(body: &str) -> Result<PartitionDef, PartitionParseError> {
         kind: "daily".into(),
         field: "start".into(),
     })?;
+    if end.is_some_and(|end| end < start) {
+        return Err(PartitionParseError::BadField {
+            key: "end".into(),
+            value: "before start".into(),
+        });
+    }
     Ok(PartitionDef::Daily { start, end })
 }
 
@@ -146,6 +162,19 @@ fn parse_static_body(body: &str) -> Result<PartitionDef, PartitionParseError> {
     if vals.is_empty() {
         return Err(PartitionParseError::EmptyList);
     }
+    let unique: std::collections::BTreeSet<_> = vals.iter().collect();
+    if unique.len() != vals.len() {
+        return Err(PartitionParseError::BadField {
+            key: "static".into(),
+            value: "duplicate partition key".into(),
+        });
+    }
+    if vals.iter().any(|value| value.contains('|')) {
+        return Err(PartitionParseError::BadField {
+            key: "static".into(),
+            value: "partition key contains reserved | separator".into(),
+        });
+    }
     Ok(PartitionDef::Static(vals))
 }
 
@@ -156,10 +185,12 @@ fn parse_multi_body(body: &str) -> Result<PartitionDef, PartitionParseError> {
         if chunk.is_empty() {
             continue;
         }
-        let eq = chunk.find('=').ok_or_else(|| PartitionParseError::BadField {
-            key: chunk.to_string(),
-            value: String::new(),
-        })?;
+        let eq = chunk
+            .find('=')
+            .ok_or_else(|| PartitionParseError::BadField {
+                key: chunk.to_string(),
+                value: String::new(),
+            })?;
         let name = chunk[..eq].trim().to_string();
         let rest = chunk[eq + 1..].trim();
         if name.is_empty() {
@@ -176,6 +207,12 @@ fn parse_multi_body(body: &str) -> Result<PartitionDef, PartitionParseError> {
                 value: "nested multi not supported".into(),
             });
         }
+        if dims.contains_key(&name) {
+            return Err(PartitionParseError::BadField {
+                key: name,
+                value: "duplicate dimension".into(),
+            });
+        }
         dims.insert(name, sub);
     }
     if dims.is_empty() {
@@ -185,7 +222,8 @@ fn parse_multi_body(body: &str) -> Result<PartitionDef, PartitionParseError> {
 }
 
 fn parse_iso_date(s: &str) -> Result<NaiveDate, PartitionParseError> {
-    NaiveDate::parse_from_str(s, "%Y-%m-%d").map_err(|_| PartitionParseError::BadDate(s.to_string()))
+    NaiveDate::parse_from_str(s, "%Y-%m-%d")
+        .map_err(|_| PartitionParseError::BadDate(s.to_string()))
 }
 
 /// Comma split that respects nested parentheses. Needed for `multi(...)`
@@ -222,11 +260,7 @@ impl PartitionDef {
     /// For `Multi`, the cartesian product of every dimension's keys is
     /// returned, joined with `|`. Dimension order is alphabetical (BTreeMap),
     /// matching how `dimension_values` JSON is stored.
-    pub fn expand_keys(
-        &self,
-        now: NaiveDate,
-        range: Option<(String, String)>,
-    ) -> Vec<String> {
+    pub fn expand_keys(&self, now: NaiveDate, range: Option<(String, String)>) -> Vec<String> {
         match self {
             PartitionDef::Daily { start, end } => {
                 let (lo, hi) = effective_daily_range(*start, *end, now, range.as_ref());
@@ -237,7 +271,10 @@ impl PartitionDef {
                 let mut d = lo;
                 while d <= hi {
                     out.push(d.format("%Y-%m-%d").to_string());
-                    d += Duration::days(1);
+                    match d.succ_opt() {
+                        Some(next) => d = next,
+                        None => break,
+                    }
                 }
                 out
             }
@@ -302,7 +339,7 @@ fn effective_daily_range(
 ) -> (NaiveDate, NaiveDate) {
     // Default upper bound: explicit end, else today + 1 (so today's partition
     // is always registered but we don't pre-register far-future keys).
-    let default_hi = end.unwrap_or_else(|| now + Duration::days(1));
+    let default_hi = end.unwrap_or_else(|| now.succ_opt().unwrap_or(now));
     let (lo, hi) = match range {
         Some((from, to)) => {
             let f = NaiveDate::parse_from_str(from, "%Y-%m-%d").unwrap_or(start);
@@ -325,7 +362,13 @@ mod tests {
     #[test]
     fn parses_daily_start_only() {
         let p = parse_partition_decl("daily(start=2026-01-01)").unwrap();
-        assert_eq!(p, PartitionDef::Daily { start: d("2026-01-01"), end: None });
+        assert_eq!(
+            p,
+            PartitionDef::Daily {
+                start: d("2026-01-01"),
+                end: None
+            }
+        );
     }
 
     #[test]
@@ -343,21 +386,25 @@ mod tests {
     #[test]
     fn parses_static() {
         let p = parse_partition_decl("static(jp,us,eu)").unwrap();
-        assert_eq!(p, PartitionDef::Static(vec!["jp".into(), "us".into(), "eu".into()]));
+        assert_eq!(
+            p,
+            PartitionDef::Static(vec!["jp".into(), "us".into(), "eu".into()])
+        );
     }
 
     #[test]
     fn parses_static_with_spaces() {
         let p = parse_partition_decl("static( a, b , c )").unwrap();
-        assert_eq!(p, PartitionDef::Static(vec!["a".into(), "b".into(), "c".into()]));
+        assert_eq!(
+            p,
+            PartitionDef::Static(vec!["a".into(), "b".into(), "c".into()])
+        );
     }
 
     #[test]
     fn parses_multi() {
-        let p = parse_partition_decl(
-            "multi(date=daily(start=2026-01-01),region=static(jp,us))",
-        )
-        .unwrap();
+        let p = parse_partition_decl("multi(date=daily(start=2026-01-01),region=static(jp,us))")
+            .unwrap();
         match p {
             PartitionDef::Multi(dims) => {
                 assert_eq!(dims.len(), 2);
@@ -410,10 +457,7 @@ mod tests {
 
     #[test]
     fn rejects_nested_multi() {
-        let err = parse_partition_decl(
-            "multi(a=multi(b=daily(start=2026-01-01)))",
-        )
-        .unwrap_err();
+        let err = parse_partition_decl("multi(a=multi(b=daily(start=2026-01-01)))").unwrap_err();
         assert!(matches!(err, PartitionParseError::BadField { .. }));
     }
 
@@ -435,7 +479,10 @@ mod tests {
         };
         let keys = p.expand_keys(d("2026-05-17"), None);
         // start..=now+1 → 5/15, 5/16, 5/17, 5/18
-        assert_eq!(keys, vec!["2026-05-15", "2026-05-16", "2026-05-17", "2026-05-18"]);
+        assert_eq!(
+            keys,
+            vec!["2026-05-15", "2026-05-16", "2026-05-17", "2026-05-18"]
+        );
     }
 
     #[test]
@@ -481,14 +528,15 @@ mod tests {
 
     #[test]
     fn split_key_multi_pairs_names_and_values() {
-        let p = parse_partition_decl(
-            "multi(date=daily(start=2026-01-01),region=static(jp,us))",
-        )
-        .unwrap();
+        let p = parse_partition_decl("multi(date=daily(start=2026-01-01),region=static(jp,us))")
+            .unwrap();
         let parts = p.split_key("2026-05-17|jp");
         assert_eq!(
             parts,
-            vec![("date".into(), "2026-05-17".into()), ("region".into(), "jp".into())]
+            vec![
+                ("date".into(), "2026-05-17".into()),
+                ("region".into(), "jp".into())
+            ]
         );
     }
 
@@ -499,5 +547,31 @@ mod tests {
             p.split_key("jp"),
             vec![("partition_key".into(), "jp".into())]
         );
+    }
+}
+
+#[cfg(test)]
+mod boundary_regressions {
+    use super::*;
+    #[test]
+    fn maximum_date_expansion_terminates() {
+        let def = PartitionDef::Daily {
+            start: NaiveDate::MAX,
+            end: Some(NaiveDate::MAX),
+        };
+        assert_eq!(def.expand_keys(NaiveDate::MAX, None).len(), 1);
+    }
+    #[test]
+    fn ambiguous_partition_declarations_fail() {
+        for invalid in [
+            "daily(start=2026-01-02,end=2026-01-01)",
+            "daily(start=2026-01-01,start=2026-01-02)",
+            "daily(start=2026-01-01,end=2026-01-02,end=2026-01-03)",
+            "multi(region=static(jp),region=static(us))",
+            "static(jp,jp)",
+            "static(jp|us)",
+        ] {
+            assert!(parse_partition_decl(invalid).is_err(), "{invalid}");
+        }
     }
 }
