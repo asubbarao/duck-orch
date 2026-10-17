@@ -530,6 +530,9 @@ static void OrchInitPragma(ClientContext &context, const FunctionParameters &par
 // ========================================================================
 
 namespace yyjson_ns = duckdb_yyjson;
+using duckdb_yyjson::unsafe_yyjson_get_next;
+using duckdb_yyjson::yyjson_arr_get_first;
+using duckdb_yyjson::yyjson_arr_size;
 
 static string SqlEscape(const string &s) {
 	string out;
