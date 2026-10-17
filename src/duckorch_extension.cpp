@@ -4313,6 +4313,18 @@ static IngestResult IngestLoadPath(Connection &con, const string &path, const st
 	string prefix;
 	if (!catalog_name.empty()) prefix += catalog_name + ".";
 	if (!schema_name.empty()) prefix += schema_name + ".";
+	auto tables = yyjson_ns::yyjson_obj_get(root, "tables");
+	std::map<string, std::pair<bool, std::vector<IngestColumn>>> existing_tables;
+	if (tables && yyjson_ns::yyjson_is_arr(tables)) {
+		size_t ti, tmax;
+		yyjson_ns::yyjson_val *t;
+		yyjson_arr_foreach(tables, ti, tmax, t) {
+			string qualified = IngestJsonStr(t, "qualified");
+			bool exists = false;
+			auto columns = DescribeRelation(con, qualified, exists);
+			existing_tables.emplace(std::move(qualified), std::make_pair(exists, std::move(columns)));
+		}
+	}
 
 	IngestExec(con, "BEGIN TRANSACTION", "transaction start");
 
@@ -4320,7 +4332,6 @@ static IngestResult IngestLoadPath(Connection &con, const string &path, const st
 	std::vector<std::array<string, 2>> prune_tables; // qualified, depth
 	std::vector<LedgerWrite> ledger;
 
-	auto tables = yyjson_ns::yyjson_obj_get(root, "tables");
 	if (tables && yyjson_ns::yyjson_is_arr(tables)) {
 		size_t ti, tmax;
 		yyjson_ns::yyjson_val *t;
@@ -4353,8 +4364,9 @@ static IngestResult IngestLoadPath(Connection &con, const string &path, const st
 			string new_cols_json = cols_raw ? string(cols_raw, cl) : string("[]");
 			if (cols_raw) free(cols_raw);
 
-			bool exists = false;
-			auto old_cols = DescribeRelation(con, qualified, exists);
+			auto &old_table = existing_tables.at(qualified);
+			bool exists = old_table.first;
+			auto &old_cols = old_table.second;
 
 			// kind, column, from, to, ddl
 			std::vector<std::array<string, 5>> changes;
