@@ -8,6 +8,7 @@
 #include "duckdb/function/scalar_function.hpp"
 #include "duckdb/function/pragma_function.hpp"
 #include "duckdb/parser/parsed_data/create_pragma_function_info.hpp"
+#include "duckdb/parser/parsed_data/create_scalar_function_info.hpp"
 #include "duckdb/common/vector_operations/unary_executor.hpp"
 #include "duckdb/common/vector_operations/binary_executor.hpp"
 #include "duckdb/common/vector_operations/ternary_executor.hpp"
@@ -4932,6 +4933,21 @@ static void OrchIngestResetPragma(ClientContext &context,
 // Extension entry
 // ========================================================================
 
+static void RegisterDescribedScalarFunction(ExtensionLoader &loader, ScalarFunction function,
+                                            vector<string> parameter_names, string description, string example,
+                                            string category) {
+	CreateScalarFunctionInfo info(std::move(function));
+	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
+	FunctionDescription function_description;
+	function_description.parameter_types = info.functions.functions[0].arguments;
+	function_description.parameter_names = std::move(parameter_names);
+	function_description.description = std::move(description);
+	function_description.examples.push_back(std::move(example));
+	function_description.categories.push_back(std::move(category));
+	info.descriptions.push_back(std::move(function_description));
+	loader.RegisterFunction(std::move(info));
+}
+
 static void LoadInternal(ExtensionLoader &loader) {
 	auto &config = loader.GetDatabaseInstance().config;
 	config.AddExtensionOption("orch_openlineage_url",
@@ -4957,27 +4973,47 @@ static void LoadInternal(ExtensionLoader &loader) {
 	oext.pre_optimize_function = OrchPreOptimize;
 	OptimizerExtension::Register(config, std::move(oext));
 
-	loader.RegisterFunction(
-	    ScalarFunction("orch_hello", {LogicalType::VARCHAR}, LogicalType::VARCHAR, OrchHelloFunc));
-	loader.RegisterFunction(ScalarFunction("orch_extract_io", {LogicalType::VARCHAR},
-	                                        LogicalType::VARCHAR, OrchExtractIoFunc));
-	loader.RegisterFunction(ScalarFunction("orch_parse_task",
-	                                        {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                                        LogicalType::VARCHAR, OrchParseTaskFunc));
-	loader.RegisterFunction(ScalarFunction("orch_load_directory_json", {LogicalType::VARCHAR},
-	                                        LogicalType::VARCHAR, OrchLoadDirectoryFunc));
-	loader.RegisterFunction(ScalarFunction("orch_build_dag", {LogicalType::VARCHAR},
-	                                        LogicalType::VARCHAR, OrchBuildDagFunc));
-	loader.RegisterFunction(ScalarFunction(
-	    "orch_render_mermaid",
-	    {LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::VARCHAR},
-	    LogicalType::VARCHAR, OrchRenderMermaidFunc));
-	loader.RegisterFunction(ScalarFunction("orch_downstream_of",
-	                                        {LogicalType::VARCHAR, LogicalType::VARCHAR},
-	                                        LogicalType::VARCHAR, OrchDownstreamOfFunc));
+	RegisterDescribedScalarFunction(
+	    loader, ScalarFunction("orch_hello", {LogicalType::VARCHAR}, LogicalType::VARCHAR, OrchHelloFunc), {"name"},
+	    "Returns a greeting from the duckorch core library for the supplied name.", "orch_hello('world')", "greeting");
+	RegisterDescribedScalarFunction(
+	    loader, ScalarFunction("orch_extract_io", {LogicalType::VARCHAR}, LogicalType::VARCHAR, OrchExtractIoFunc),
+	    {"sql"}, "Extracts input and output datasets from a SQL statement as JSON.",
+	    "orch_extract_io('INSERT INTO dst SELECT * FROM src')", "lineage");
+	RegisterDescribedScalarFunction(loader,
+	                                ScalarFunction("orch_parse_task", {LogicalType::VARCHAR, LogicalType::VARCHAR},
+	                                               LogicalType::VARCHAR, OrchParseTaskFunc),
+	                                {"sql", "file_path"},
+	                                "Parses a task SQL document and returns its task metadata as JSON.",
+	                                "orch_parse_task('-- @task name=demo\\nSELECT 1', 'demo.sql')", "tasks");
+	RegisterDescribedScalarFunction(
+	    loader,
+	    ScalarFunction("orch_load_directory_json", {LogicalType::VARCHAR}, LogicalType::VARCHAR, OrchLoadDirectoryFunc),
+	    {"path"}, "Walks a directory's SQL files and returns parsed tasks and errors as JSON.",
+	    "orch_load_directory_json('.')", "tasks");
+	RegisterDescribedScalarFunction(
+	    loader, ScalarFunction("orch_build_dag", {LogicalType::VARCHAR}, LogicalType::VARCHAR, OrchBuildDagFunc),
+	    {"tasks_json"}, "Builds a dependency DAG from task definitions encoded as JSON.", "orch_build_dag('[]')",
+	    "dag");
+	RegisterDescribedScalarFunction(
+	    loader,
+	    ScalarFunction("orch_render_mermaid", {LogicalType::VARCHAR, LogicalType::INTEGER, LogicalType::VARCHAR},
+		               LogicalType::VARCHAR, OrchRenderMermaidFunc),
+	    {"dag_json", "mode", "statuses_json"},
+	    "Renders a task DAG and lineage as Mermaid text using execution statuses.",
+	    "orch_render_mermaid('{\"order\":[],\"task_edges\":[],\"lineage_edges\":[]}', 0, '[]')", "visualization");
+	RegisterDescribedScalarFunction(
+	    loader,
+	    ScalarFunction("orch_downstream_of", {LogicalType::VARCHAR, LogicalType::VARCHAR}, LogicalType::VARCHAR,
+		               OrchDownstreamOfFunc),
+	    {"tasks_json", "failed_task"},
+	    "Returns the task names downstream of a failed task from task definitions encoded as JSON.",
+	    "orch_downstream_of('[]', 'failed_task')", "dag");
 
 	// PRAGMAs: side-effect ones use pragma_function_t (void return).
 	// orch_visualize stays pragma_query_t since it returns a SELECT statement.
+	// DuckDB 1.5.x exposes no ExtensionLoader::RegisterFunction(CreatePragmaFunctionInfo)
+	// overload, so pragma descriptions cannot be attached through the extension API.
 	loader.RegisterFunction(PragmaFunction::PragmaStatement(
 	    "orch_init", static_cast<pragma_function_t>(OrchInitPragma)));
 	loader.RegisterFunction(PragmaFunction::PragmaCall(
