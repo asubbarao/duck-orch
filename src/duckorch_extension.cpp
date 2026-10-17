@@ -1415,11 +1415,12 @@ static bool RunSingleTask(Connection &con, const TaskRow &task, const string &pi
 					ran_ok = false;
 					break;
 				}
-				case_insensitive_map_t<BoundParameterData> bind_map;
+				identifier_map_t<BoundParameterData> bind_map;
 				for (auto &kv : values) {
-					if (prepared->GetNamedParameterMap().find(kv.first) !=
+					Identifier key(kv.first);
+					if (prepared->GetNamedParameterMap().find(key) !=
 					    prepared->GetNamedParameterMap().end()) {
-						bind_map.emplace(kv.first, BoundParameterData(kv.second));
+						bind_map.emplace(std::move(key), BoundParameterData(kv.second));
 					}
 				}
 				auto qres = prepared->Execute(bind_map);
