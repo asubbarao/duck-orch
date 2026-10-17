@@ -4940,6 +4940,11 @@ static void OrchIngestResetPragma(ClientContext &context,
 static void RegisterDescribedScalarFunction(ExtensionLoader &loader, ScalarFunction function,
                                             vector<string> parameter_names, string description, string example,
                                             string category) {
+	auto &signature = function.GetSignature();
+	D_ASSERT(signature.GetParameterCount() == parameter_names.size());
+	for (idx_t i = 0; i < parameter_names.size(); i++) {
+		signature.GetParameter(i).SetName(Identifier(parameter_names[i]));
+	}
 	CreateScalarFunctionInfo info(std::move(function));
 	info.on_conflict = OnCreateConflict::ALTER_ON_CONFLICT;
 	FunctionDescription function_description;
@@ -5002,7 +5007,7 @@ static void LoadInternal(ExtensionLoader &loader) {
 	                                               LogicalType::VARCHAR, OrchParseTaskFunc),
 	                                {"sql", "file_path"},
 	                                "Parses a task SQL document and returns its task metadata as JSON.",
-	                                "orch_parse_task('-- @task name=demo\\nSELECT 1', 'demo.sql')", "tasks");
+	                                "orch_parse_task('-- @task name=demo' || chr(10) || 'SELECT 1', 'demo.sql')", "tasks");
 	RegisterDescribedScalarFunction(
 	    loader,
 	    ScalarFunction("orch_load_directory_json", {LogicalType::VARCHAR}, LogicalType::VARCHAR, OrchLoadDirectoryFunc),
